@@ -19,12 +19,13 @@ pak::pak("Theogeo-ge/sitgr")
 | `sitg_search("mot_clé")` | Cherche une couche par nom |
 | `sitg_info("NOM_COUCHE")` | Affiche les métadonnées d'une couche |
 | `sitg_download("NOM_COUCHE")` | Télécharge la couche comme objet `sf` |
-| `sitg_download("NOM_COUCHE" where = "")` | Télécharge la couche comme objet `sf`. La fonction "where" permet de faire des requêtes SQL pour filter la couche|
+| `sitg_download("NOM_COUCHE" where = "")` | Télécharge la couche comme objet `sf`. La fonction "where" permet de faire des requêtes SQL pour filtrer la couche|
 
 ## Exemples
 
 | `carouge <- sitg_download(CAD_COMMUNE, where = "COMMUNE = 'Carouge'"` | Filtre SQL-style ArcGIS REST |
 
+| `ac <- sitg_download("OTC_ACCIDENTS", where = "ANNEE > 2015 AND COMMUNE = 'Meyrin'")` | Filtre SQL-style ArcGIS REST |
 
 ## Dépendances
 
