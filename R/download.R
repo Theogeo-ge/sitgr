@@ -1,69 +1,70 @@
+#' Télécharger une couche vecteur du SITG
+#'
+#' @param layer_name Nom exact de la couche (retourné par `sitg_search()`)
+#' @param where      Filtre SQL ArcGIS (défaut : toutes les entités)
+#' @param page_size  Nombre d'entités par requête (défaut : 1000)
+#' @param max_active Nombre de connexions HTTP parallèles (défaut : 10)
+#' @param output_file Chemin vers un fichier .gpkg pour les grandes couches.
+#'   Si fourni, les pages sont écrites sur disque au fur et à mesure
+#'   (évite le freeze mémoire sur les couches > 20 000 entités).
+#'   La fonction retourne alors le chemin (invisible) au lieu d'un sf.
+#' @param quiet      Masquer les messages de progression
+#' @return Un objet sf en EPSG:2056, ou le chemin output_file (invisible)
+#' @export
+sitg_download <- function(layer_name,
+                           where       = "1=1",
+                           page_size   = 2000,
+                           max_active  = 10,
+                           output_file = NULL,
+                           quiet       = FALSE) {
 
-sitg_download <- function(layer,
-                          server      = "vector",
-                          layer_id    = 0,
-                          where       = "1=1",
-                          fields      = "*",
-                          crs         = 2056,
-                          bbox        = NULL,
-                          max_records = Inf,
-                          max_active  = 10,
-                          output_file = NULL,
-                          quiet       = FALSE) {
+  url <- paste0(SITG_BASE_URL, "/", layer_name, "/FeatureServer/0")
 
-  url <- .resolve_layer_url(layer, server, layer_id)
+  # 1. Compter le total d'entités avant de paginer
+  n_total <- .sitg_count(url, where)
 
-  out_fields <- if (identical(fields, "*")) "*" else paste(fields, collapse = ",")
-
-  geometry_filter <- NULL
-  if (!is.null(bbox)) {
-    bb <- sf::st_bbox(sf::st_transform(bbox, 2056))
-    geometry_filter <- paste0(
-      bb["xmin"], ",", bb["ymin"], ",", bb["xmax"], ",", bb["ymax"]
-    )
+  if (n_total == 0L) {
+    cli::cli_warn("Aucune entité trouvée pour {.val {layer_name}} avec where = {.val {where}}")
+    return(invisible(NULL))
   }
 
-  n_total <- .sitg_count(url, where, geometry_filter)
-  if (!quiet) cli::cli_inform("Couche : {.val {basename(dirname(url))}}")
-  if (!quiet) cli::cli_inform("  {n_total} entité{?s} correspondant au filtre.")
+  n_pages <- ceiling(n_total / page_size)
 
-  n_fetch   <- if (is.finite(max_records)) min(n_total, max_records) else n_total
-  page_size <- 2000
-  n_pages   <- ceiling(n_fetch / page_size)
-  offsets   <- seq(0, n_fetch - 1, by = page_size)
-
-  if (!quiet && n_pages > 1) {
-    cli::cli_inform("  Téléchargement en {n_pages} page{?s} (parallèle)...")
+  if (!quiet) {
+    cli::cli_inform(c(
+      "i" = "{n_total} entit\u00e9{?s} \u2014 {n_pages} page{?s} de {page_size}"
+    ))
   }
 
-  base_params <- list(where = where, outFields = out_fields, f = "geojson")
-  if (!is.null(crs))             base_params$outSR        <- crs
-  if (!is.null(geometry_filter)) base_params$geometry     <- geometry_filter
-  if (!is.null(geometry_filter)) base_params$geometryType <- "esriGeometryEnvelope"
-  if (!is.null(geometry_filter)) base_params$inSR         <- 2056
-
-  query_url <- paste0(url, "/query")
+  # 2. Construire toutes les requêtes d'un coup
+  offsets <- seq(0, n_total - 1, by = page_size)
 
   reqs <- lapply(offsets, function(off) {
-    n_this <- min(page_size, n_fetch - off)
-    httr2::request(query_url) |>
-      httr2::req_url_query(!!!base_params,
-                           resultOffset      = off,
-                           resultRecordCount = n_this) |>
+    httr2::request(paste0(url, "/query")) |>
+      httr2::req_url_query(
+        where             = where,
+        outFields         = "*",
+        resultOffset      = off,
+        resultRecordCount = page_size,
+        f                 = "geojson"
+      ) |>
       httr2::req_timeout(60)
   })
 
+  # 3. Exécuter toutes les requêtes en parallèle
+  if (!quiet) cli::cli_inform("  Envoi de {length(reqs)} requ\u00eate{?s} en parall\u00e8le...")
+
   resps <- httr2::req_perform_parallel(
     reqs,
-    on_error   = "continue",
-    max_active = max_active
+    on_error   = "continue",  # continue si une page échoue
+    max_active = max_active   # connexions simultanées max
   )
 
-  # Convertir chaque réponse GeoJSON -> sf
-  all_pages <- lapply(seq_along(resps), function(i) {
+  # 4. Convertir chaque réponse en sf (skip les erreurs)
+  pages <- lapply(seq_along(resps), function(i) {
     r <- resps[[i]]
     if (inherits(r, "error")) {
-      cli::cli_warn("Page {i}/{n_pages} échouée : {conditionMessage(r)}")
+      cli::cli_warn("Page {i}/{n_pages} \u00e9chou\u00e9e : {conditionMessage(r)}")
       return(NULL)
     }
     tryCatch(
@@ -75,32 +76,40 @@ sitg_download <- function(layer,
     )
   })
 
-  all_pages <- Filter(Negate(is.null), all_pages)
+  pages <- Filter(Negate(is.null), pages)
 
-  if (length(all_pages) == 0L) {
-    cli::cli_abort("Toutes les pages ont échoué.")
+  if (length(pages) == 0L) {
+    cli::cli_abort("Toutes les pages ont \u00e9chou\u00e9.")
   }
 
-  # Assembler toutes les pages en un seul sf (rapide)
-  if (!quiet) cli::cli_inform("  Assemblage des pages...")
-  result <- do.call(rbind, lapply(all_pages, function(x) x[, names(all_pages[[1]])]))
-
-  # Écriture disque en une seule opération
+  # 5a. Grande couche : écrire sur disque page par page (évite le freeze RAM)
   if (!is.null(output_file)) {
-    if (!quiet) cli::cli_inform("  Écriture vers {.file {output_file}}...")
-    sf::st_write(result, output_file, quiet = TRUE, delete_dsn = TRUE)
+    if (!quiet) cli::cli_inform("  \u00c9criture vers {.file {output_file}}...")
+
+    for (i in seq_along(pages)) {
+      sf::st_write(
+        pages[[i]],
+        output_file,
+        append = (i > 1),
+        quiet  = TRUE
+      )
+    }
+
+    n_ecrites <- sum(vapply(pages, nrow, integer(1)))
     if (!quiet) {
-      cli::cli_inform(c("v" = "{nrow(result)} entité{?s} écrite{?s} dans {.file {output_file}}"))
+      cli::cli_inform(c("v" = "{n_ecrites} entit\u00e9{?s} \u00e9crite{?s} dans {.file {output_file}}"))
     }
     return(invisible(output_file))
   }
 
+  # 5b. Petite couche : assembler en mémoire
+  result <- do.call(rbind, pages)
+
   if (!quiet) {
-    cli::cli_inform(
-      c("v" = "{nrow(result)} entité{?s} téléchargée{?s} — CRS : EPSG:{sf::st_crs(result)$epsg %||% '?'}")
-    )
+    cli::cli_inform(c(
+      "v" = "{nrow(result)} entit\u00e9{?s} t\u00e9l\u00e9charg\u00e9e{?s} \u2014 CRS : EPSG:{sf::st_crs(result)$epsg %||% '?'}"
+    ))
   }
 
   result
 }
-

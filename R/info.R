@@ -1,54 +1,37 @@
+#' Inspecter les métadonnées d'une couche
+#'
+#' @param layer_name Nom exact de la couche (retourné par `sitg_search()`)
+#' @return Les métadonnées brutes (invisible)
+#' @export
+sitg_info <- function(layer_name) {
+  url <- paste0(SITG_BASE_URL, "/", layer_name, "/FeatureServer/0")
 
-  # sitg_info() — inspecter les métadonnées d'une couche SITG
+  req <- httr2::request(url) |>
+    httr2::req_url_query(f = "json")
 
+  data <- sitg_perform(req)
 
-sitg_info <- function(layer, server = "vector", layer_id = 0) {
-  url <- .resolve_layer_url(layer, server, layer_id)
-  
-  cli::cli_inform("Chargement des métadonnées : {.url {url}}")
-  
-  req  <- sitg_request(url)
-  meta <- sitg_perform(req)
+  # Compter les entités via .sitg_count() — plus fiable que data$count
   n <- tryCatch(
     .sitg_count(url),
     error = function(e) NA_integer_
   )
-  
-  # affichage propre
-  cli::cli_h1("Couche : {meta$name %||% basename(url)}")
-  
-  if (!is.null(meta$description) && nchar(meta$description) > 0) {
-    cli::cli_inform("{meta$description}")
-  }
-  
-  cli::cli_h2("Informations générales")
+
+  cli::cli_h1(data$name %||% layer_name)
   cli::cli_bullets(c(
-    "*" = "Type géométrie : {.val {meta$geometryType %||% 'N/A'}}",
-    "*" = "Entités        : {.val {if (is.na(n)) '?' else n}}",
-    "*" = "CRS (WKID)     : {.val {meta$extent$spatialReference$wkid %||% 'N/A'}}",
-    "*" = "Max enreg.     : {.val {meta$maxRecordCount %||% 'N/A'}}"
+    "*" = paste("Géométrie :", data$geometryType %||% "inconnue"),
+    "*" = paste("Entités   :", if (is.na(n)) "?" else n),
+    "*" = paste("Champs    :", length(data$fields), "colonnes")
   ))
-  
-  # extent
-  if (!is.null(meta$extent)) {
-    ext <- meta$extent
-    cli::cli_h2("Étendue spatiale")
-    cli::cli_bullets(c(
-      "*" = "XMin : {round(ext$xmin, 0)}  XMax : {round(ext$xmax, 0)}",
-      "*" = "YMin : {round(ext$ymin, 0)}  YMax : {round(ext$ymax, 0)}"
-    ))
+
+  if (!is.null(data$fields) && length(data$fields) > 0) {
+    # Extraction sécurisée — certains champs n'ont pas de clé "name"
+    champs <- vapply(data$fields, function(f) {
+      f[["name"]] %||% "?"
+    }, character(1))
+    cli::cli_h2("Champs disponibles")
+    cli::cli_bullets(stats::setNames(champs, rep("*", length(champs))))
   }
-  
-  # champs
-  if (!is.null(meta$fields) && length(meta$fields) > 0) {
-    fields <- meta$fields
-    if (is.data.frame(fields)) {
-      cli::cli_h2("Champs ({nrow(fields)})")
-      for (i in seq_len(nrow(fields))) {
-        cli::cli_bullets(c("*" = "{fields$name[i]} ({fields$type[i]})"))
-      }
-    }
-  }
-  
-  invisible(meta)
+
+  invisible(data)
 }

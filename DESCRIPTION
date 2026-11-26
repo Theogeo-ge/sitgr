@@ -1,14 +1,18 @@
 Package: sitgr
 Title: Interface R pour les services ArcGIS REST du SITG (Genève)
 Version: 0.2.0
-Authors@R: person("Théo Giezendanner", role = c("aut", "cre"),
-                  email = "theo.giezendanner@unige.ch")
+Authors@R: person("Giezenski", role = c("aut", "cre"),
+                  email = "contact@example.com")
 Description: Permet d'explorer et de télécharger des couches vecteur depuis
     le Système d'Information du Territoire Genevois (SITG) via son API
     ArcGIS REST. Fournit quatre fonctions : sitg_catalog(), sitg_search(),
     sitg_info(), et sitg_download(). Cette dernière supporte la pagination
     automatique en parallèle et le streaming sur disque pour les grandes
     couches.
+License: MIT + file LICENSE
+Encoding: UTF-8
+Roxygen: list(markdown = TRUE)
+RoxygenNote: 7.3.1
 Imports:
     httr2 (>= 1.0.0),
     sf,
